@@ -68,7 +68,7 @@ python backtest/backtest.py
 ## Discord bot setup
 
 1. In the Discord channel, go to **Edit Channel → Integrations → Webhooks → New Webhook**, then copy the URL.
-2. In this repo, go to **Settings → Secrets and variables → Actions → New repository secret**. Name it `DISCORD_WEBHOOK_EMAVWAP` and paste the URL as the value.
+2. In this repo, go to **Settings → Secrets and variables → Actions → New repository secret**. Name it `EMAVWAP` and paste the URL as the value.
 3. Go to **Actions → EMA x VWAP paper bot → Run workflow**. This runs one test pass. After that, the bot runs on its own Sun 6pm to Fri 5pm ET.
 
 **What it posts:**

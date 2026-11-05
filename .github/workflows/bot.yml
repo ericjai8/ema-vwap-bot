@@ -9,7 +9,7 @@ name: EMA x VWAP paper bot
 # concurrency group keeps exactly one bot running and queues the next, so
 # coverage is continuous. Outside CME hours a run exits right away.
 #
-# Discord: add the repo secret DISCORD_WEBHOOK_EMAVWAP (the channel webhook URL).
+# Discord: the repo secret EMAVWAP holds the channel webhook URL.
 # DISCORD_WEBHOOK also works (messages are then tagged [EMA×VWAP]).
 on:
   schedule:
@@ -40,7 +40,7 @@ jobs:
       - run: pip install -r requirements.txt
       - name: Run bot
         env:
-          DISCORD_WEBHOOK_EMAVWAP: ${{ secrets.DISCORD_WEBHOOK_EMAVWAP }}
+          DISCORD_WEBHOOK_EMAVWAP: ${{ secrets.EMAVWAP || secrets.DISCORD_WEBHOOK_EMAVWAP }}
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: |
           git config user.name "ema-vwap-bot"
