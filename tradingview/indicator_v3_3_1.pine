@@ -1,0 +1,376 @@
+//@version=6
+indicator("9 EMA × VWAP Filtered (v3.3.1 Trend-Change Exit)", overlay=true, max_labels_count=300)
+
+//══════════════════════════════════════════════════════════════
+// INPUTS  (v2.1 — unchanged)
+//══════════════════════════════════════════════════════════════
+grp1 = "Core Settings"
+emaFastLen     = input.int(9,  "Fast EMA (9)", group=grp1)
+emaSlowLen     = input.int(21, "Slow EMA (21) Filter", group=grp1)
+use21Filter    = input.bool(true, "Use 21 EMA Filter", group=grp1)
+useSlopeFilter = input.bool(true, "Use VWAP Slope Filter", group=grp1)
+slopeLookback  = input.int(5, "VWAP Slope Lookback", minval=3, maxval=10, group=grp1)
+minSlope       = input.float(0.05, "Min VWAP Slope (points)", step=0.01, group=grp1)
+
+grp2 = "Exits & Risk"
+showExits      = input.bool(true, "Show Exit Signals", group=grp2)
+useATR         = input.bool(true, "Show ATR Stop & 2R Target", group=grp2)
+atrLen         = input.int(14, "ATR Length", group=grp2)
+atrMult        = input.float(1.2, "ATR Stop Multiplier", step=0.1, group=grp2)
+rrTarget       = input.float(2.0, "Risk:Reward Target", step=0.1, group=grp2)
+
+grp3 = "Display"
+showEMA21      = input.bool(true, "Show 21 EMA", group=grp3)
+colEMA9        = input.color(color.aqua, "9 EMA Color", group=grp3)
+colVWAP        = input.color(color.yellow, "VWAP Color", group=grp3)
+colEMA21       = input.color(color.orange, "21 EMA Color", group=grp3)
+
+//══════════════════════════════════════════════════════════════
+// INPUTS  (trend-change exit — unchanged from v3.2)
+//══════════════════════════════════════════════════════════════
+grp4 = "Trend-Change Exit"
+exitMode     = input.string("Trend Change", "Exit mode", options=["Trend Change", "Classic (v2.1)"], group=grp4, tooltip="Trend Change = hold until several reversal signs line up. Classic = exact v2.1 exits (for comparison).")
+exitScore    = input.int(3, "Exit when trend-change score reaches", minval=2, maxval=4, group=grp4, tooltip="Score out of 4 (long shown; short is mirrored):\n1) Close below VWAP\n2) 9 EMA below 21 EMA\n3) VWAP sloping down\n4) Swing structure broken against the trade (CHoCH)\nHigher = hold longer.")
+confirmBars  = input.int(2, "…and holds for this many closes", minval=1, maxval=5, group=grp4, tooltip="Stops a single dip from ending the trade.")
+warnScore    = input.int(2, "Warn at score", minval=1, maxval=4, group=grp4)
+pivotLen     = input.int(5, "Structure swing strength", minval=2, maxval=15, group=grp4, tooltip="Bars each side of a swing. Higher = only major swings count, so minor pullbacks don't trip the structure check.")
+useHardStop  = input.bool(true, "Hard stop at", inline="hs", group=grp4)
+hardStopMult = input.float(2.5, "× ATR (disaster only)", minval=0.5, step=0.1, inline="hs", group=grp4)
+useBE        = input.bool(false, "Breakeven at", inline="be", group=grp4)
+beAtR        = input.float(1.5, "R", minval=0.5, step=0.25, inline="be", group=grp4)
+showWarn     = input.bool(true, "Show trend-change warning (⚠)", group=grp4)
+showReason   = input.bool(true, "Show exit reason", group=grp4)
+showCont     = input.bool(false, "Show BOS continuation markers", group=grp4)
+reasonGap    = input.float(1.5, "Exit reason distance (× ATR)", minval=0.5, step=0.25, group=grp4)
+
+//══════════════════════════════════════════════════════════════
+// INPUTS  (NEW v3.3)
+//══════════════════════════════════════════════════════════════
+grp5 = "Early Warning — Sweep & Reclaim"
+showEarly   = input.bool(true, "Show early warning", group=grp5, tooltip="Fires when price takes out a recent swing in your trade's direction, then closes back through it. Short: low swept then reclaimed. Long: high swept then lost. Warning only — never exits the trade.")
+sweepLen    = input.int(3, "Sweep swing strength", minval=1, maxval=10, group=grp5, tooltip="Bars each side of the swing that can be swept. Lower = smaller swings count: earlier, more frequent warnings.")
+reclaimBars = input.int(3, "Must reclaim within (bars)", minval=0, maxval=10, group=grp5, tooltip="0 = only a wick through the level that closes back on the same bar.")
+
+grp6 = "R Milestones"
+showR  = input.bool(true, "Label R milestones", group=grp6)
+firstR = input.int(2, "Start labeling at", minval=1, maxval=10, group=grp6, tooltip="Prints every whole R reached (2R, 3R, 4R…) until the trade exits. If one candle covers several, they stack in one label. R = ATR × ATR Stop Multiplier at entry.")
+rGap   = input.float(0.9, "R label distance (× ATR)", minval=0.0, step=0.1, group=grp6, tooltip="Pushes R labels away from the bar so they don't sit on top of Sweep / ⚠ markers.")
+
+//══════════════════════════════════════════════════════════════
+// CALCULATIONS  (v2.1 — unchanged)
+//══════════════════════════════════════════════════════════════
+ema9  = ta.ema(close, emaFastLen)
+ema21 = ta.ema(close, emaSlowLen)
+vwap  = ta.vwap(hlc3)
+atr   = ta.atr(atrLen)
+
+vwapSlope   = vwap - vwap[slopeLookback]
+vwapRising  = vwapSlope > minSlope
+vwapFalling = vwapSlope < -minSlope
+
+bullClose = close > ema9 and close > vwap
+bearClose = close < ema9 and close < vwap
+
+bullTrend = not use21Filter or ema9 > ema21
+bearTrend = not use21Filter or ema9 < ema21
+
+bullSlopeOK = not useSlopeFilter or vwapRising
+bearSlopeOK = not useSlopeFilter or vwapFalling
+
+rawLong  = ta.crossover(ema9, vwap)
+rawShort = ta.crossunder(ema9, vwap)
+
+longCondition  = rawLong  and barstate.isconfirmed and bullClose and bullTrend and bullSlopeOK
+shortCondition = rawShort and barstate.isconfirmed and bearClose and bearTrend and bearSlopeOK
+
+classicExitLong  = rawShort or (close < ema9 and close[1] >= ema9)
+classicExitShort = rawLong  or (close > ema9 and close[1] <= ema9)
+
+//══════════════════════════════════════════════════════════════
+// MARKET STRUCTURE — major swings only (unchanged)
+//══════════════════════════════════════════════════════════════
+ph = ta.pivothigh(high, pivotLen, pivotLen)
+pl = ta.pivotlow(low,  pivotLen, pivotLen)
+
+var float swingHigh = na
+var float swingLow  = na
+var bool  shTaken   = true
+var bool  slTaken   = true
+
+if not na(ph)
+    swingHigh := ph
+    shTaken   := false
+if not na(pl)
+    swingLow  := pl
+    slTaken   := false
+
+bullBreak = false
+bearBreak = false
+if not shTaken and close > swingHigh
+    bullBreak := true
+    shTaken   := true
+if not slTaken and close < swingLow
+    bearBreak := true
+    slTaken   := true
+
+//══════════════════════════════════════════════════════════════
+// NEW — SWEEP & RECLAIM (early warning layer)
+//══════════════════════════════════════════════════════════════
+sph = ta.pivothigh(high, sweepLen, sweepLen)
+spl = ta.pivotlow(low,  sweepLen, sweepLen)
+
+var float sLow      = na
+var float sHigh     = na
+var int   lowSwept  = na
+var int   highSwept = na
+
+if not na(spl)
+    sLow     := spl
+    lowSwept := na
+if not na(sph)
+    sHigh     := sph
+    highSwept := na
+
+bullReclaim = false   // low swept, closed back above  → warns SHORTS
+bearReclaim = false   // high swept, closed back below → warns LONGS
+
+if not na(sLow)
+    if na(lowSwept) and low < sLow
+        lowSwept := bar_index
+    if not na(lowSwept)
+        if close > sLow and bar_index - lowSwept <= reclaimBars
+            bullReclaim := true
+            sLow     := na
+            lowSwept := na
+        else if bar_index - lowSwept >= reclaimBars
+            sLow     := na      // stayed below: accepted, level is spent
+            lowSwept := na
+
+if not na(sHigh)
+    if na(highSwept) and high > sHigh
+        highSwept := bar_index
+    if not na(highSwept)
+        if close < sHigh and bar_index - highSwept <= reclaimBars
+            bearReclaim := true
+            sHigh     := na
+            highSwept := na
+        else if bar_index - highSwept >= reclaimBars
+            sHigh     := na
+            highSwept := na
+
+//══════════════════════════════════════════════════════════════
+// TREND-CHANGE SCORE (evidence AGAINST the open trade)
+//══════════════════════════════════════════════════════════════
+scoreAgainstLong(structFlag) =>
+    (close < vwap ? 1 : 0) + (ema9 < ema21 ? 1 : 0) + (vwapFalling ? 1 : 0) + (structFlag ? 1 : 0)
+scoreAgainstShort(structFlag) =>
+    (close > vwap ? 1 : 0) + (ema9 > ema21 ? 1 : 0) + (vwapRising ? 1 : 0) + (structFlag ? 1 : 0)
+
+//══════════════════════════════════════════════════════════════
+// POSITION STATE
+//══════════════════════════════════════════════════════════════
+var int   position      = 0
+var float stopLevel     = na
+var float targetLevel   = na
+var float entryPx       = na
+var float risk          = na
+var int   entryBar      = na
+var bool  beDone        = false
+var bool  tgtHit        = false
+var bool  structAgainst = false
+var int   hitCount      = 0
+var bool  warned        = false
+var int   lastR         = 0
+
+exitLong  = false
+exitShort = false
+why       = ""
+score     = 0
+warnL     = false
+warnS     = false
+earlyL    = false
+earlyS    = false
+rHitL     = 0
+rHitS     = 0
+rTextL    = ""
+rTextS    = ""
+bosL      = false
+bosS      = false
+
+if barstate.isconfirmed
+    // ── LONG
+    if position == 1 and bar_index > entryBar
+        if exitMode == "Classic (v2.1)"
+            if classicExitLong
+                exitLong := true
+                why      := "9 EMA"
+        else
+            if bearBreak
+                structAgainst := true
+            if bullBreak
+                structAgainst := false
+            score    := scoreAgainstLong(structAgainst)
+            hitCount := score >= exitScore ? hitCount + 1 : 0
+            if useHardStop and low <= stopLevel
+                exitLong := true
+                why      := stopLevel >= entryPx ? "BE" : "Stop"
+            else if hitCount >= confirmBars
+                exitLong := true
+                why      := "Trend Δ " + str.tostring(score) + "/4"
+            else
+                warnL  := score >= warnScore and not warned
+                warned := score >= warnScore
+                bosL   := bullBreak
+                earlyL := bearReclaim
+                if risk > 0
+                    curR = math.floor((high - entryPx) / risk)
+                    if curR >= firstR and curR > lastR
+                        startR = math.max(lastR + 1, firstR)
+                        // above the bar: highest R on top, lowest nearest the candle
+                        for i = 0 to curR - startR
+                            rTextL := rTextL + (i > 0 ? "\n" : "") + str.tostring(curR - i) + "R"
+                        rHitL := curR
+                        lastR := curR
+                if not tgtHit and high >= targetLevel
+                    tgtHit := true
+                if useBE and not beDone and high >= entryPx + risk * beAtR
+                    beDone    := true
+                    stopLevel := math.max(stopLevel, entryPx)
+
+    // ── SHORT
+    if position == -1 and bar_index > entryBar
+        if exitMode == "Classic (v2.1)"
+            if classicExitShort
+                exitShort := true
+                why       := "9 EMA"
+        else
+            if bullBreak
+                structAgainst := true
+            if bearBreak
+                structAgainst := false
+            score    := scoreAgainstShort(structAgainst)
+            hitCount := score >= exitScore ? hitCount + 1 : 0
+            if useHardStop and high >= stopLevel
+                exitShort := true
+                why       := stopLevel <= entryPx ? "BE" : "Stop"
+            else if hitCount >= confirmBars
+                exitShort := true
+                why       := "Trend Δ " + str.tostring(score) + "/4"
+            else
+                warnS  := score >= warnScore and not warned
+                warned := score >= warnScore
+                bosS   := bearBreak
+                earlyS := bullReclaim
+                if risk > 0
+                    curR = math.floor((entryPx - low) / risk)
+                    if curR >= firstR and curR > lastR
+                        startR = math.max(lastR + 1, firstR)
+                        // below the bar: lowest R nearest the candle, highest at the bottom
+                        for i = 0 to curR - startR
+                            rTextS := rTextS + (i > 0 ? "\n" : "") + str.tostring(startR + i) + "R"
+                        rHitS := curR
+                        lastR := curR
+                if not tgtHit and low <= targetLevel
+                    tgtHit := true
+                if useBE and not beDone and low <= entryPx - risk * beAtR
+                    beDone    := true
+                    stopLevel := math.min(stopLevel, entryPx)
+
+    if exitLong or exitShort
+        position := 0
+
+// ── Entries
+// Trend Change mode: take a new trade only when flat, so an open trade isn't cut by the next cross.
+// Classic mode: v2.1 behavior (every signal flips/refreshes).
+canEnter  = position == 0 or exitMode == "Classic (v2.1)"
+trendMode = exitMode == "Trend Change"
+
+if longCondition and canEnter
+    position      := 1
+    entryPx       := close
+    risk          := atr * atrMult
+    stopLevel     := trendMode ? close - atr * hardStopMult : close - risk
+    targetLevel   := close + risk * rrTarget
+    entryBar      := bar_index
+    beDone        := false
+    tgtHit        := false
+    structAgainst := false
+    hitCount      := 0
+    warned        := false
+    lastR         := 0
+if shortCondition and canEnter
+    position      := -1
+    entryPx       := close
+    risk          := atr * atrMult
+    stopLevel     := trendMode ? close + atr * hardStopMult : close + risk
+    targetLevel   := close - risk * rrTarget
+    entryBar      := bar_index
+    beDone        := false
+    tgtHit        := false
+    structAgainst := false
+    hitCount      := 0
+    warned        := false
+    lastR         := 0
+
+//══════════════════════════════════════════════════════════════
+// PLOTS
+//══════════════════════════════════════════════════════════════
+plot(ema9,  "9 EMA",  color=colEMA9,  linewidth=2)
+plot(vwap,  "VWAP",   color=colVWAP,  linewidth=2)
+plot(showEMA21 ? ema21 : na, "21 EMA", color=colEMA21, linewidth=1)
+
+plotshape(longCondition,  title="BUY",  style=shape.triangleup,   location=location.belowbar, color=color.lime, size=size.normal, text="BUY")
+plotshape(shortCondition, title="SELL", style=shape.triangledown, location=location.abovebar, color=color.red,  size=size.normal, text="SELL")
+
+plotshape(showExits and exitLong,  title="Exit Long",  style=shape.xcross, location=location.abovebar, color=color.orange, size=size.small, text="EXIT")
+plotshape(showExits and exitShort, title="Exit Short", style=shape.xcross, location=location.belowbar, color=color.orange, size=size.small, text="EXIT")
+
+plot(useATR and position == 1  ? stopLevel   : na, "Long Stop",    color=color.red,   style=plot.style_linebr, linewidth=1)
+plot(useATR and position == 1  and not tgtHit ? targetLevel : na, "Long Target",  color=color.green, style=plot.style_linebr, linewidth=1)
+plot(useATR and position == -1 ? stopLevel   : na, "Short Stop",   color=color.red,   style=plot.style_linebr, linewidth=1)
+plot(useATR and position == -1 and not tgtHit ? targetLevel : na, "Short Target", color=color.green, style=plot.style_linebr, linewidth=1)
+
+// Warnings: early (sweep & reclaim) + confirmed (⚠ score)
+plotshape(showEarly and earlyL, title="Early warning (long)",  style=shape.circle, location=location.abovebar, color=color.fuchsia, size=size.tiny, text="Sweep")
+plotshape(showEarly and earlyS, title="Early warning (short)", style=shape.circle, location=location.belowbar, color=color.fuchsia, size=size.tiny, text="Sweep")
+plotshape(showWarn and warnL, title="Trend warning (long)",  style=shape.triangledown, location=location.abovebar, color=color.yellow, size=size.tiny, text="⚠")
+plotshape(showWarn and warnS, title="Trend warning (short)", style=shape.triangleup,   location=location.belowbar, color=color.yellow, size=size.tiny, text="⚠")
+
+plotshape(showCont and bosL, title="BOS (long)",  style=shape.diamond, location=location.abovebar, color=color.teal,   size=size.tiny, text="BOS")
+plotshape(showCont and bosS, title="BOS (short)", style=shape.diamond, location=location.belowbar, color=color.maroon, size=size.tiny, text="BOS")
+
+// R milestones: 2R, 3R, 4R… until the trade exits
+if showR and rTextL != ""
+    label.new(bar_index, high + atr * rGap, rTextL, yloc=yloc.price, style=label.style_label_down, color=color.new(color.black, 100), textcolor=color.green, size=size.small)
+if showR and rTextS != ""
+    label.new(bar_index, low - atr * rGap, rTextS, yloc=yloc.price, style=label.style_label_up, color=color.new(color.black, 100), textcolor=color.green, size=size.small)
+
+// Exit reason: placed clear of the X
+if showExits and showReason and exitLong
+    label.new(bar_index, high + atr * reasonGap, why, yloc=yloc.price, style=label.style_label_down, color=color.new(color.orange, 10), textcolor=color.black, size=size.small)
+if showExits and showReason and exitShort
+    label.new(bar_index, low - atr * reasonGap, why, yloc=yloc.price, style=label.style_label_up, color=color.new(color.orange, 10), textcolor=color.black, size=size.small)
+
+// Data Window only: hover a bar to see the live trend-change score (0–4)
+plot(position != 0 or exitLong or exitShort ? score : na, "Trend-change score", display=display.data_window)
+
+//══════════════════════════════════════════════════════════════
+// ALERTS
+//══════════════════════════════════════════════════════════════
+alertcondition(longCondition,    "Filtered BUY",  "BUY - 9EMA crossed above VWAP")
+alertcondition(shortCondition,   "Filtered SELL", "SELL - 9EMA crossed below VWAP")
+alertcondition(exitLong,         "Exit Long",     "Exit Long")
+alertcondition(exitShort,        "Exit Short",    "Exit Short")
+alertcondition(earlyL or earlyS, "Early Warning", "Sweep & reclaim against open trade")
+alertcondition(warnL or warnS,   "Trend Warning", "Trend change building against open trade")
+
+if exitLong or exitShort
+    alert(syminfo.ticker + " EXIT " + (exitLong ? "LONG" : "SHORT") + " — " + why, alert.freq_once_per_bar_close)
+if (longCondition or shortCondition) and position != 0 and bar_index == entryBar
+    alert(syminfo.ticker + (position == 1 ? " BUY" : " SELL") + " @ " + str.tostring(close, format.mintick) + " | stop " + str.tostring(stopLevel, format.mintick), alert.freq_once_per_bar_close)
+if earlyL or earlyS
+    alert(syminfo.ticker + " early warning: sweep & reclaim against " + (earlyL ? "LONG" : "SHORT"), alert.freq_once_per_bar_close)
+if warnL or warnS
+    alert(syminfo.ticker + " ⚠ trend change building against " + (warnL ? "LONG" : "SHORT"), alert.freq_once_per_bar_close)
+if rHitL > 0 or rHitS > 0
+    alert(syminfo.ticker + " " + str.tostring(math.max(rHitL, rHitS)) + "R reached", alert.freq_once_per_bar_close)

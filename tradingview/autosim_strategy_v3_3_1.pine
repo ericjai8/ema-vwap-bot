@@ -1,0 +1,253 @@
+//@version=6
+// 9 EMA × VWAP v3.3.1 — AUTO SIM
+// Same signals and trend-change logic as the v3.3.1 indicator, traded as a plan:
+//   • Enter N contracts on the BUY / SELL bar close (only when flat)
+//   • Hard stop on every contract (2.5 × ATR, same as indicator)
+//   • TP1: 1 contract at 2R  → then stop on the rest moves to breakeven (optional)
+//   • TP2: 1 contract at 4R, or closed early at the ⚠ if the trade is in profit
+//   • Runner: rest held until the trend-change EXIT
+// Leave it on a chart: TradingView keeps simulating every new bar, and the
+// Strategy Tester → List of Trades becomes your forward-test log.
+strategy("9 EMA × VWAP v3.3.1 — Auto Sim", overlay=true,
+     initial_capital=50000, default_qty_type=strategy.fixed, default_qty_value=3,
+     commission_type=strategy.commission.cash_per_contract, commission_value=0.62,
+     slippage=1, process_orders_on_close=true, pyramiding=0,
+     margin_long=0, margin_short=0, max_labels_count=300)
+
+//══════════════════════════════════════════════════════════════
+// INPUTS — signals (identical to v3.3.1)
+//══════════════════════════════════════════════════════════════
+grp1 = "Core Settings"
+emaFastLen     = input.int(9,  "Fast EMA (9)", group=grp1)
+emaSlowLen     = input.int(21, "Slow EMA (21) Filter", group=grp1)
+use21Filter    = input.bool(true, "Use 21 EMA Filter", group=grp1)
+useSlopeFilter = input.bool(true, "Use VWAP Slope Filter", group=grp1)
+slopeLookback  = input.int(5, "VWAP Slope Lookback", minval=3, maxval=10, group=grp1)
+minSlope       = input.float(0.05, "Min VWAP Slope (points)", step=0.01, group=grp1)
+
+grp2 = "Risk (same as indicator)"
+atrLen       = input.int(14, "ATR Length", group=grp2)
+atrMult      = input.float(1.2, "1R = ATR ×", step=0.1, group=grp2, tooltip="Same R as the indicator's R labels.")
+hardStopMult = input.float(2.5, "Hard stop = ATR ×", minval=0.5, step=0.1, group=grp2)
+
+grp4 = "Trend-Change Exit (same as indicator)"
+exitScore   = input.int(3, "Exit when trend-change score reaches", minval=2, maxval=4, group=grp4)
+confirmBars = input.int(2, "…and holds for this many closes", minval=1, maxval=5, group=grp4)
+warnScore   = input.int(2, "⚠ at score", minval=1, maxval=4, group=grp4)
+pivotLen    = input.int(5, "Structure swing strength", minval=2, maxval=15, group=grp4)
+
+//══════════════════════════════════════════════════════════════
+// INPUTS — trade plan
+//══════════════════════════════════════════════════════════════
+grpT = "Trade Plan"
+contracts  = input.int(3, "Contracts per trade", minval=1, maxval=20, group=grpT)
+tp1R       = input.float(2.0, "TP1 at (R)", minval=0.5, step=0.25, inline="t1", group=grpT)
+tp1Qty     = input.int(1, "qty", minval=0, inline="t1", group=grpT)
+tp2R       = input.float(4.0, "TP2 at (R)", minval=0.5, step=0.25, inline="t2", group=grpT)
+tp2Qty     = input.int(1, "qty", minval=0, inline="t2", group=grpT)
+tp2AtWarn  = input.bool(true, "Close TP2 early at ⚠ (only if trade is in profit)", group=grpT)
+beAfterTP1 = input.bool(true, "Move stop to breakeven after TP1 fills", group=grpT)
+
+grpD = "Display"
+showSignals = input.bool(true, "Show BUY / SELL signals (every filtered cross, like the indicator)", group=grpD)
+showR       = input.bool(true, "Show R milestones", group=grpD)
+firstR      = input.int(2, "Start R labels at", minval=1, maxval=10, group=grpD)
+rGap        = input.float(0.9, "R label distance (× ATR)", minval=0.0, step=0.1, group=grpD)
+showLines   = input.bool(true, "Show 9 EMA / VWAP / 21 EMA (turn off if the indicator is also on the chart)", group=grpD)
+
+grp5 = "Window"
+startDate = input.time(timestamp("2024-01-01T00:00:00"), "Start", group=grp5)
+inRange   = time >= startDate
+
+// Split contracts: TP1 / TP2 / runner
+tp1Q = math.min(tp1Qty, contracts)
+tp2Q = math.min(tp2Qty, contracts - tp1Q)
+runQ = contracts - tp1Q - tp2Q
+
+//══════════════════════════════════════════════════════════════
+// SIGNALS (identical to v3.3.1)
+//══════════════════════════════════════════════════════════════
+ema9  = ta.ema(close, emaFastLen)
+ema21 = ta.ema(close, emaSlowLen)
+vwap  = ta.vwap(hlc3)
+atr   = ta.atr(atrLen)
+
+vwapSlope   = vwap - vwap[slopeLookback]
+vwapRising  = vwapSlope > minSlope
+vwapFalling = vwapSlope < -minSlope
+
+bullClose = close > ema9 and close > vwap
+bearClose = close < ema9 and close < vwap
+bullTrend = not use21Filter or ema9 > ema21
+bearTrend = not use21Filter or ema9 < ema21
+bullSlopeOK = not useSlopeFilter or vwapRising
+bearSlopeOK = not useSlopeFilter or vwapFalling
+
+longCondition  = ta.crossover(ema9, vwap)  and barstate.isconfirmed and bullClose and bullTrend and bullSlopeOK
+shortCondition = ta.crossunder(ema9, vwap) and barstate.isconfirmed and bearClose and bearTrend and bearSlopeOK
+
+ph = ta.pivothigh(high, pivotLen, pivotLen)
+pl = ta.pivotlow(low,  pivotLen, pivotLen)
+var float swingHigh = na
+var float swingLow  = na
+var bool  shTaken   = true
+var bool  slTaken   = true
+if not na(ph)
+    swingHigh := ph
+    shTaken   := false
+if not na(pl)
+    swingLow  := pl
+    slTaken   := false
+bullBreak = false
+bearBreak = false
+if not shTaken and close > swingHigh
+    bullBreak := true
+    shTaken   := true
+if not slTaken and close < swingLow
+    bearBreak := true
+    slTaken   := true
+
+//══════════════════════════════════════════════════════════════
+// STATE
+//══════════════════════════════════════════════════════════════
+var int   dir           = 0       // 1 long, -1 short, 0 flat
+var float entryPx       = na
+var float risk          = na
+var float stopLevel     = na
+var bool  tp1Done       = false
+var bool  tp2Done       = false
+var int   expectedQty   = 0
+var bool  structAgainst = false
+var int   hitCount      = 0
+var bool  warned        = false
+var int   lastR         = 0
+
+pos    = strategy.position_size
+absPos = int(math.round(math.abs(pos)))
+
+// Flat again (stop, trend exit, or all targets) → reset
+if dir != 0 and pos == 0 and expectedQty > 0 and bar_index > 0
+    dir         := 0
+    expectedQty := 0
+
+// Detect target fills: position shrank without us closing it
+if dir != 0 and absPos > 0 and absPos < expectedQty
+    dropped = expectedQty - absPos
+    if not tp1Done and tp1Q > 0 and dropped >= tp1Q
+        tp1Done := true
+        dropped -= tp1Q
+        if beAfterTP1
+            stopLevel := entryPx
+    if not tp2Done and tp2Q > 0 and dropped >= tp2Q
+        tp2Done := true
+    expectedQty := absPos
+
+//══════════════════════════════════════════════════════════════
+// MANAGEMENT
+//══════════════════════════════════════════════════════════════
+warnNow  = false
+exitNow  = false
+exitText = ""
+
+if dir != 0 and absPos > 0 and barstate.isconfirmed
+    if dir == 1
+        if bearBreak
+            structAgainst := true
+        if bullBreak
+            structAgainst := false
+    else
+        if bullBreak
+            structAgainst := true
+        if bearBreak
+            structAgainst := false
+    score = dir == 1 ?
+         (close < vwap ? 1 : 0) + (ema9 < ema21 ? 1 : 0) + (vwapFalling ? 1 : 0) + (structAgainst ? 1 : 0) :
+         (close > vwap ? 1 : 0) + (ema9 > ema21 ? 1 : 0) + (vwapRising  ? 1 : 0) + (structAgainst ? 1 : 0)
+    hitCount := score >= exitScore ? hitCount + 1 : 0
+    warnNow  := score >= warnScore and not warned
+    warned   := score >= warnScore
+
+    if hitCount >= confirmBars
+        exitNow  := true
+        exitText := "Trend Δ " + str.tostring(score) + "/4"
+        strategy.close(dir == 1 ? "L" : "S", comment=exitText)
+    else if warnNow and tp2AtWarn and not tp2Done and tp2Q > 0
+        inProfit = dir == 1 ? close > entryPx : close < entryPx
+        if inProfit
+            strategy.close(dir == 1 ? "L" : "S", qty=tp2Q, comment="⚠ TP2")
+            strategy.cancel(dir == 1 ? "L-TP2" : "S-TP2")
+            tp2Done     := true
+            expectedQty := expectedQty - tp2Q
+
+//══════════════════════════════════════════════════════════════
+// ENTRIES (only when flat)
+//══════════════════════════════════════════════════════════════
+newEntry = false
+if inRange and dir == 0 and pos == 0 and not exitNow
+    if longCondition
+        strategy.entry("L", strategy.long, qty=contracts, comment="BUY")
+        dir := 1
+    else if shortCondition
+        strategy.entry("S", strategy.short, qty=contracts, comment="SELL")
+        dir := -1
+    if dir != 0
+        newEntry      := true
+        entryPx       := close
+        risk          := atr * atrMult
+        stopLevel     := dir == 1 ? close - atr * hardStopMult : close + atr * hardStopMult
+        tp1Done       := false
+        tp2Done       := false
+        expectedQty   := contracts
+        structAgainst := false
+        hitCount      := 0
+        warned        := false
+        lastR         := 0
+
+//══════════════════════════════════════════════════════════════
+// R MILESTONES — every whole R reached, stacked if one candle covers several
+//══════════════════════════════════════════════════════════════
+rText = ""
+if dir != 0 and absPos > 0 and not newEntry and barstate.isconfirmed and risk > 0
+    curR = dir == 1 ? math.floor((high - entryPx) / risk) : math.floor((entryPx - low) / risk)
+    if curR >= firstR and curR > lastR
+        startR = math.max(lastR + 1, firstR)
+        for i = 0 to curR - startR
+            rText := rText + (i > 0 ? "\n" : "") + str.tostring(dir == 1 ? curR - i : startR + i) + "R"
+        lastR := curR
+if showR and rText != ""
+    if dir == 1
+        label.new(bar_index, high + atr * rGap, rText, yloc=yloc.price, style=label.style_label_down, color=color.new(color.black, 100), textcolor=color.green, size=size.small)
+    else
+        label.new(bar_index, low - atr * rGap, rText, yloc=yloc.price, style=label.style_label_up, color=color.new(color.black, 100), textcolor=color.green, size=size.small)
+
+//══════════════════════════════════════════════════════════════
+// EXIT ORDERS — re-sent every bar so the stop follows breakeven
+//══════════════════════════════════════════════════════════════
+if dir == 1 and not exitNow
+    if tp1Q > 0 and not tp1Done
+        strategy.exit("L-TP1", "L", qty=tp1Q, limit=entryPx + risk * tp1R, stop=stopLevel, comment_profit="TP1 " + str.tostring(tp1R) + "R", comment_loss="Stop")
+    if tp2Q > 0 and not tp2Done
+        strategy.exit("L-TP2", "L", qty=tp2Q, limit=entryPx + risk * tp2R, stop=stopLevel, comment_profit="TP2 " + str.tostring(tp2R) + "R", comment_loss="Stop")
+    if runQ > 0
+        strategy.exit("L-RUN", "L", qty=runQ, stop=stopLevel, comment_loss=stopLevel == entryPx ? "BE" : "Stop")
+if dir == -1 and not exitNow
+    if tp1Q > 0 and not tp1Done
+        strategy.exit("S-TP1", "S", qty=tp1Q, limit=entryPx - risk * tp1R, stop=stopLevel, comment_profit="TP1 " + str.tostring(tp1R) + "R", comment_loss="Stop")
+    if tp2Q > 0 and not tp2Done
+        strategy.exit("S-TP2", "S", qty=tp2Q, limit=entryPx - risk * tp2R, stop=stopLevel, comment_profit="TP2 " + str.tostring(tp2R) + "R", comment_loss="Stop")
+    if runQ > 0
+        strategy.exit("S-RUN", "S", qty=runQ, stop=stopLevel, comment_loss=stopLevel == entryPx ? "BE" : "Stop")
+
+//══════════════════════════════════════════════════════════════
+// PLOTS
+//══════════════════════════════════════════════════════════════
+plot(showLines ? ema9  : na, "9 EMA",  color=color.aqua,   linewidth=2)
+plot(showLines ? vwap  : na, "VWAP",   color=color.yellow, linewidth=2)
+plot(showLines ? ema21 : na, "21 EMA", color=color.orange, linewidth=1)
+plotshape(showSignals and longCondition,  title="BUY",  style=shape.triangleup,   location=location.belowbar, color=color.lime, size=size.normal, text="BUY")
+plotshape(showSignals and shortCondition, title="SELL", style=shape.triangledown, location=location.abovebar, color=color.red,  size=size.normal, text="SELL")
+inTrade = dir != 0
+plot(inTrade ? stopLevel : na, "Stop", color=color.red, style=plot.style_linebr)
+plot(inTrade and not tp1Done ? (dir == 1 ? entryPx + risk * tp1R : entryPx - risk * tp1R) : na, "TP1", color=color.green, style=plot.style_linebr)
+plot(inTrade and not tp2Done ? (dir == 1 ? entryPx + risk * tp2R : entryPx - risk * tp2R) : na, "TP2", color=color.new(color.green, 50), style=plot.style_linebr)
+plotshape(warnNow, title="⚠", style=shape.triangledown, location=location.abovebar, color=color.yellow, size=size.tiny, text="⚠")

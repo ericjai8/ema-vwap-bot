@@ -1,0 +1,206 @@
+//@version=6
+// Backtest version of "9 EMA × VWAP Filtered (v3.4)".
+// Same entries, filters and exits as the indicator. Turn the three v3.4 switches
+// OFF to get the old v3.2 baseline, then turn them on one at a time and compare.
+strategy("9 EMA × VWAP v3.4 — Backtest", overlay=true,
+     initial_capital=50000, default_qty_type=strategy.fixed, default_qty_value=1,
+     commission_type=strategy.commission.cash_per_contract, commission_value=0.62,
+     slippage=1, process_orders_on_close=true, pyramiding=0,
+     margin_long=0, margin_short=0)
+
+//══════════════════════════════════════════════════════════════
+// INPUTS
+//══════════════════════════════════════════════════════════════
+grp1 = "Core Settings"
+emaFastLen     = input.int(9,  "Fast EMA (9)", group=grp1)
+emaSlowLen     = input.int(21, "Slow EMA (21) Filter", group=grp1)
+use21Filter    = input.bool(true, "Use 21 EMA Filter", group=grp1)
+useSlopeFilter = input.bool(true, "Use VWAP Slope Filter", group=grp1)
+slopeLookback  = input.int(5, "VWAP Slope Lookback", minval=3, maxval=10, group=grp1)
+minSlope       = input.float(0.05, "Min VWAP Slope (points)", step=0.01, group=grp1)
+
+grp2 = "Risk"
+atrLen         = input.int(14, "ATR Length", group=grp2)
+atrMult        = input.float(1.2, "ATR Stop Multiplier (defines 1R)", step=0.1, group=grp2)
+
+grp4 = "Trend-Change Exit"
+exitMode     = input.string("Trend Change", "Exit mode", options=["Trend Change", "Classic (v2.1)"], group=grp4)
+exitScore    = input.int(3, "Exit when trend-change score reaches", minval=2, maxval=4, group=grp4)
+confirmBars  = input.int(2, "…and holds for this many closes", minval=1, maxval=5, group=grp4)
+pivotLen     = input.int(5, "Structure swing strength", minval=2, maxval=15, group=grp4)
+useHardStop  = input.bool(true, "Hard stop at", inline="hs", group=grp4)
+hardStopMult = input.float(2.5, "× ATR", minval=0.5, step=0.1, inline="hs", group=grp4)
+useBE        = input.bool(false, "Breakeven at", inline="be", group=grp4)
+beAtR        = input.float(1.5, "R", minval=0.5, step=0.25, inline="be", group=grp4)
+
+grp7 = "Entry Filters & Invalidation (v3.4)"
+useInval  = input.bool(false, "Early invalidation within", inline="inv", group=grp7)
+invalBars = input.int(3, "bars", minval=1, maxval=10, inline="inv", group=grp7)
+useChop   = input.bool(false, "Chop filter: skip if VWAP crossed", inline="chop", group=grp7)
+chopMax   = input.int(2, "+ times in last", minval=1, maxval=10, inline="chop", group=grp7)
+chopLook  = input.int(10, "bars", minval=3, maxval=50, inline="chop", group=grp7)
+useExt    = input.bool(false, "Extension filter: skip if ran >", inline="ext", group=grp7)
+extATR    = input.float(3.0, "× ATR in last", minval=0.5, step=0.25, inline="ext", group=grp7)
+extBars   = input.int(8, "bars", minval=2, maxval=30, inline="ext", group=grp7)
+
+grp5 = "Backtest window"
+startDate = input.time(timestamp("2024-01-01T00:00:00"), "Start", group=grp5)
+endDate   = input.time(timestamp("2099-01-01T00:00:00"), "End",   group=grp5)
+inRange   = time >= startDate and time <= endDate
+
+//══════════════════════════════════════════════════════════════
+// CALCULATIONS (identical to indicator v3.4)
+//══════════════════════════════════════════════════════════════
+ema9  = ta.ema(close, emaFastLen)
+ema21 = ta.ema(close, emaSlowLen)
+vwap  = ta.vwap(hlc3)
+atr   = ta.atr(atrLen)
+
+vwapSlope   = vwap - vwap[slopeLookback]
+vwapRising  = vwapSlope > minSlope
+vwapFalling = vwapSlope < -minSlope
+
+bullClose = close > ema9 and close > vwap
+bearClose = close < ema9 and close < vwap
+bullTrend = not use21Filter or ema9 > ema21
+bearTrend = not use21Filter or ema9 < ema21
+bullSlopeOK = not useSlopeFilter or vwapRising
+bearSlopeOK = not useSlopeFilter or vwapFalling
+
+rawLong  = ta.crossover(ema9, vwap)
+rawShort = ta.crossunder(ema9, vwap)
+
+baseLong  = rawLong  and barstate.isconfirmed and bullClose and bullTrend and bullSlopeOK
+baseShort = rawShort and barstate.isconfirmed and bearClose and bearTrend and bearSlopeOK
+
+aboveVwap  = close > vwap
+priceCross = aboveVwap != aboveVwap[1]
+crossCount = math.sum(priceCross ? 1 : 0, chopLook)[1]
+choppy     = useChop and crossCount >= chopMax
+
+runUp = close - ta.lowest(low, extBars)
+runDn = ta.highest(high, extBars) - close
+extL  = useExt and runUp > atr * extATR
+extS  = useExt and runDn > atr * extATR
+
+longCondition  = baseLong  and not choppy and not extL
+shortCondition = baseShort and not choppy and not extS
+
+classicExitLong  = rawShort or (close < ema9 and close[1] >= ema9)
+classicExitShort = rawLong  or (close > ema9 and close[1] <= ema9)
+
+ph = ta.pivothigh(high, pivotLen, pivotLen)
+pl = ta.pivotlow(low,  pivotLen, pivotLen)
+var float swingHigh = na
+var float swingLow  = na
+var bool  shTaken   = true
+var bool  slTaken   = true
+if not na(ph)
+    swingHigh := ph
+    shTaken   := false
+if not na(pl)
+    swingLow  := pl
+    slTaken   := false
+bullBreak = false
+bearBreak = false
+if not shTaken and close > swingHigh
+    bullBreak := true
+    shTaken   := true
+if not slTaken and close < swingLow
+    bearBreak := true
+    slTaken   := true
+
+//══════════════════════════════════════════════════════════════
+// TRADE MANAGEMENT
+//══════════════════════════════════════════════════════════════
+trendMode = exitMode == "Trend Change"
+pos       = strategy.position_size
+
+var bool  structAgainst = false
+var int   hitCount      = 0
+var float stopLevel     = na
+var float entryPx       = na
+var float risk          = na
+var bool  beDone        = false
+var int   entryBar      = na
+exitedNow = false
+
+if trendMode and pos > 0
+    if bearBreak
+        structAgainst := true
+    if bullBreak
+        structAgainst := false
+    score = (close < vwap ? 1 : 0) + (ema9 < ema21 ? 1 : 0) + (vwapFalling ? 1 : 0) + (structAgainst ? 1 : 0)
+    hitCount := score >= exitScore ? hitCount + 1 : 0
+    if useInval and bar_index - entryBar <= invalBars and close < vwap
+        strategy.close("L", comment="Failed cross")
+        exitedNow := true
+    else if hitCount >= confirmBars
+        strategy.close("L", comment="Trend " + str.tostring(score) + "/4")
+        exitedNow := true
+    else if useBE and not beDone and high >= entryPx + risk * beAtR
+        beDone    := true
+        stopLevel := math.max(stopLevel, entryPx)
+        if useHardStop
+            strategy.exit("L-stop", "L", stop=stopLevel, comment="BE")
+
+if trendMode and pos < 0
+    if bullBreak
+        structAgainst := true
+    if bearBreak
+        structAgainst := false
+    score = (close > vwap ? 1 : 0) + (ema9 > ema21 ? 1 : 0) + (vwapRising ? 1 : 0) + (structAgainst ? 1 : 0)
+    hitCount := score >= exitScore ? hitCount + 1 : 0
+    if useInval and bar_index - entryBar <= invalBars and close > vwap
+        strategy.close("S", comment="Failed cross")
+        exitedNow := true
+    else if hitCount >= confirmBars
+        strategy.close("S", comment="Trend " + str.tostring(score) + "/4")
+        exitedNow := true
+    else if useBE and not beDone and low <= entryPx - risk * beAtR
+        beDone    := true
+        stopLevel := math.min(stopLevel, entryPx)
+        if useHardStop
+            strategy.exit("S-stop", "S", stop=stopLevel, comment="BE")
+
+if not trendMode
+    if pos > 0 and classicExitLong
+        strategy.close("L", comment="9 EMA")
+        exitedNow := true
+    if pos < 0 and classicExitShort
+        strategy.close("S", comment="9 EMA")
+        exitedNow := true
+
+canEnter = inRange and (not trendMode or pos == 0 or exitedNow)
+
+if longCondition and canEnter and pos <= 0
+    strategy.entry("L", strategy.long)
+    entryPx       := close
+    risk          := atr * atrMult
+    stopLevel     := close - atr * hardStopMult
+    entryBar      := bar_index
+    beDone        := false
+    structAgainst := false
+    hitCount      := 0
+    if trendMode and useHardStop
+        strategy.exit("L-stop", "L", stop=stopLevel, comment="Stop")
+
+if shortCondition and canEnter and pos >= 0
+    strategy.entry("S", strategy.short)
+    entryPx       := close
+    risk          := atr * atrMult
+    stopLevel     := close + atr * hardStopMult
+    entryBar      := bar_index
+    beDone        := false
+    structAgainst := false
+    hitCount      := 0
+    if trendMode and useHardStop
+        strategy.exit("S-stop", "S", stop=stopLevel, comment="Stop")
+
+//══════════════════════════════════════════════════════════════
+// PLOTS
+//══════════════════════════════════════════════════════════════
+plot(ema9,  "9 EMA",  color=color.aqua,   linewidth=2)
+plot(vwap,  "VWAP",   color=color.yellow, linewidth=2)
+plot(ema21, "21 EMA", color=color.orange, linewidth=1)
+plot(trendMode and useHardStop and pos != 0 ? stopLevel : na, "Stop", color=color.red, style=plot.style_linebr)
