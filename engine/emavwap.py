@@ -44,7 +44,10 @@ DEFAULTS = dict(ema_fast=9, ema_slow=21, use21=True, use_slope=True, slope_lb=5,
                 news_block=(),        # ET (start, end) hhmm windows with no new entries, e.g. ((825, 840),)
                 max_losses_day=None,  # stop taking entries after this many losing trades in a CME day
                 warn_exit_under=None, # at the first ⚠, close everything if open profit < this many R
-                inval_bars=None)      # within N bars of entry, close if price closes back across VWAP
+                inval_bars=None,      # within N bars of entry, close if price closes back across VWAP
+                single_qty=1,         # micros in "single" mode
+                add_qty=0,            # scale-in: micros added once, on a pullback to the 9 EMA after +add_after_r
+                add_after_r=1.0)
 
 
 def indicators(df, p):
@@ -119,7 +122,7 @@ def run(bars, **kw):
         q1 = min(p["tp1_q"], p["contracts"]); q2 = min(p["tp2_q"], p["contracts"] - q1)
         qr = p["contracts"] - q1 - q2
     else:
-        q1, q2, qr = 0, 0, 1
+        q1, q2, qr = 0, 0, p["single_qty"]
 
     trades, events = [], []
     swing_h = swing_l = np.nan
@@ -133,7 +136,7 @@ def run(bars, **kw):
         q = T["legs"][leg]
         if q <= 0:
             return
-        pts = (px - T["fill"]) * T["d"]
+        pts = (px - T["fills"][leg]) * T["d"]
         usd = pts * PTV * q - 2 * FEE_SIDE * q
         T["exits"].append(dict(ts=idx[k], leg=leg, qty=q, px=px, pts=pts, usd=usd, why=why))
         T["legs"][leg] = 0
@@ -181,7 +184,7 @@ def run(bars, **kw):
                             px = o[k]                          # gapped through
                         px -= d * slip
                         why = "BE" if T["be"] else "Stop"
-                        for leg in ("tp1", "tp2", "run"):
+                        for leg in ("tp1", "tp2", "run", "add"):
                             close_leg(k, leg, px, why)
                         stopped = True
                         break
@@ -237,9 +240,18 @@ def run(bars, **kw):
                     elif warn_now and p["warn_exit_under"] is not None and open_R < p["warn_exit_under"]:
                         rule = "Warning <1R"
                     if rule:
-                        for leg in ("tp1", "tp2", "run"):
+                        for leg in ("tp1", "tp2", "run", "add"):
                             close_leg(k, leg, c[k] - d * slip, rule)
                         finish(k); ev(k, "exit", ""); T = None; exit_now = True
+                    elif p["add_qty"] and not T["added"] and T["maxR"] >= p["add_after_r"] and (
+                            (d == 1 and l[k] <= ema9[k] and c[k] > ema9[k] and c[k] > vwap[k]) or
+                            (d == -1 and h[k] >= ema9[k] and c[k] < ema9[k] and c[k] < vwap[k])):
+                        T["legs"]["add"] = p["add_qty"]
+                        T["fills"]["add"] = c[k] + d * slip
+                        T["qty"] += p["add_qty"]
+                        T["added"] = True
+                        T["stop"] = T["entry"]; T["be"] = True
+                        ev(k, "add", "", qty=p["add_qty"])
                     elif warn_now:
                         in_profit = (c[k] > T["entry"]) if d == 1 else (c[k] < T["entry"])
                         closed_tp2 = False
@@ -259,7 +271,8 @@ def run(bars, **kw):
                          r1=p["tp1_r"], r2=p["tp2_r"],
                          tp1=c[k] + d * risk * p["tp1_r"] if q1 else None,
                          tp2=c[k] + d * risk * p["tp2_r"] if q2 else None,
-                         legs=dict(tp1=q1, tp2=q2, run=qr), qty=q1 + q2 + qr,
+                         legs=dict(tp1=q1, tp2=q2, run=qr, add=0), qty=q1 + q2 + qr, added=False,
+                         fills=dict(tp1=c[k] + d * slip, tp2=c[k] + d * slip, run=c[k] + d * slip, add=None),
                          be=False, struct=False, hit=0, warned=False, lastR=0, maxR=0, exits=[])
                 ev(k, "entry", "")
     return trades, events, T
