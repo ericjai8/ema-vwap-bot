@@ -33,7 +33,7 @@ Shorts use the mirror image. The ⚠ warning prints at a score of 2/4.
 ## Layout
 
 ```
-tradingview/   Pine v6: indicator, auto-sim strategy, backtest strategy
+tradingview/   Pine v6: indicator, auto-sim strategy (autosim_strategy.pine), backtest strategy
 engine/        emavwap.py: the strategy in Python (fills follow TradingView's broker emulator)
 backtest/      backtest.py: results by year, session and side
 bot/           bot.py: 24/5 Discord paper bot; state.json and trades.csv are written by the bot
