@@ -1,0 +1,25 @@
+variant,size,trades,win,pf,net,maxdd,worst_day,net_ex_top1pct,eval_pass,days_to_pass,days_to_fail
+A  as-is (holds overnight),"1 micro, trend exit",2410,26%,1.18,25586,-4365,-1374,-14048,57%,38.0,29.0
+A  as-is (holds overnight),"2 micros, trend exit",2410,26%,1.18,51172,-8730,-2748,-28095,49%,12.0,11.0
+A  as-is (holds overnight),"3 micros, 2R/4R/runner",2499,48%,1.09,32142,-10150,-3227,-18039,54%,18.0,10.0
+"B  prop rules: flat 4:55pm, no 4-6pm entries, skip 8:30 data","1 micro, trend exit",2469,28%,1.19,26537,-4908,-1497,-8327,52%,34.0,37.0
+"B  prop rules: flat 4:55pm, no 4-6pm entries, skip 8:30 data","2 micros, trend exit",2469,28%,1.19,53073,-9816,-2993,-16653,52%,14.0,10.0
+"B  prop rules: flat 4:55pm, no 4-6pm entries, skip 8:30 data","3 micros, 2R/4R/runner",2547,49%,1.12,39593,-11657,-3227,-7118,52%,15.0,9.0
+C  B + stop after 2 losses/day,"1 micro, trend exit",1529,28%,1.21,16230,-4191,-843,-4207,59%,57.0,35.0
+C  B + stop after 2 losses/day,"2 micros, trend exit",1529,28%,1.21,32461,-8382,-1686,-8413,48%,17.0,19.0
+C  B + stop after 2 losses/day,"3 micros, 2R/4R/runner",1847,48%,1.1,23647,-14798,-2529,-6898,60%,21.0,11.0
+D  C + exit at ⚠ if under +1R,"1 micro, trend exit",1572,27%,1.19,11906,-4828,-568,-8550,53%,49.0,48.0
+D  C + exit at ⚠ if under +1R,"2 micros, trend exit",1572,27%,1.19,23812,-9656,-1136,-17099,50%,21.0,20.0
+D  C + exit at ⚠ if under +1R,"3 micros, 2R/4R/runner",1831,44%,1.08,16487,-12767,-1704,-13823,54%,24.0,14.0
+E  C + failed-cross exit (3 bars),"1 micro, trend exit",1526,25%,1.1,7050,-5770,-843,-11125,40%,61.0,54.0
+E  C + failed-cross exit (3 bars),"2 micros, trend exit",1526,25%,1.1,14100,-11539,-1686,-22250,45%,20.5,22.0
+E  C + failed-cross exit (3 bars),"3 micros, 2R/4R/runner",1821,43%,1.06,12424,-15664,-2529,-17333,48%,24.0,15.0
+F  C + stop 2.0 ATR,"1 micro, trend exit",1527,26%,1.16,11646,-6397,-675,-8594,63%,59.0,30.0
+F  C + stop 2.0 ATR,"2 micros, trend exit",1527,26%,1.16,23292,-12794,-1350,-17187,55%,21.5,18.0
+F  C + stop 2.0 ATR,"3 micros, 2R/4R/runner",1825,45%,1.07,15772,-17740,-2026,-13792,54%,23.0,13.0
+G  C + stop 1.5 ATR,"1 micro, trend exit",1514,22%,1.06,3577,-5439,-508,-15300,35%,53.0,54.5
+G  C + stop 1.5 ATR,"2 micros, trend exit",1514,22%,1.06,7154,-10879,-1015,-30599,38%,24.0,22.5
+G  C + stop 1.5 ATR,"3 micros, 2R/4R/runner",1767,39%,1.01,1529,-17559,-1523,-25575,51%,31.5,15.0
+H  D + E (⚠<1R + failed cross),"1 micro, trend exit",1563,26%,1.1,6165,-5286,-568,-11425,39%,74.0,55.0
+H  D + E (⚠<1R + failed cross),"2 micros, trend exit",1563,26%,1.1,12331,-10572,-1136,-22851,42%,24.0,24.0
+H  D + E (⚠<1R + failed cross),"3 micros, 2R/4R/runner",1809,41%,1.06,11148,-13452,-1704,-18361,49%,24.0,17.0

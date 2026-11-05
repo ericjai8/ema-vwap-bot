@@ -37,7 +37,14 @@ DEFAULTS = dict(ema_fast=9, ema_slow=21, use21=True, use_slope=True, slope_lb=5,
                 exit_score=3, confirm=2, warn_score=2, pivot=5,
                 contracts=3, tp1_r=2.0, tp1_q=1, tp2_r=4.0, tp2_q=1,
                 tp2_at_warn=True, be_after_tp1=True, slip_ticks=1,
-                exit_mode="plan")   # "plan" | "single" (1 micro, stop + trend exit) | "classic" (v2.1 exit)
+                exit_mode="plan",   # "plan" | "single" (1 micro, stop + trend exit) | "classic" (v2.1 exit)
+                # ---- prop rules / loss cutting (all off by default = original v3.3.1 behaviour)
+                flat_at=None,         # ET hhmm bar-open time; close everything on that bar's close (1650 -> flat 16:55)
+                no_entry_from=None,   # ET hhmm; no new entries from here until 18:00 (new CME day)
+                news_block=(),        # ET (start, end) hhmm windows with no new entries, e.g. ((825, 840),)
+                max_losses_day=None,  # stop taking entries after this many losing trades in a CME day
+                warn_exit_under=None, # at the first ⚠, close everything if open profit < this many R
+                inval_bars=None)      # within N bars of entry, close if price closes back across VWAP
 
 
 def indicators(df, p):
@@ -95,6 +102,19 @@ def run(bars, **kw):
     short_sig = xdn & (c < ema9) & (c < vwap) & ((ema9 < ema21) if p["use21"] else ok) & (falling if p["use_slope"] else ok)
 
     mode = p["exit_mode"]
+    et = I["et"]
+    hm = np.asarray(et.hour * 100 + et.minute)
+    tday = np.asarray((et + pd.Timedelta(hours=6)).date)
+    losses_day = {}
+
+    def blocked(k):
+        if p["no_entry_from"] is not None and p["no_entry_from"] <= hm[k] < 1800:
+            return True
+        if any(a <= hm[k] < b for a, b in p["news_block"]):
+            return True
+        if p["max_losses_day"] is not None and losses_day.get(tday[k], 0) >= p["max_losses_day"]:
+            return True
+        return False
     if mode == "plan":
         q1 = min(p["tp1_q"], p["contracts"]); q2 = min(p["tp2_q"], p["contracts"] - q1)
         qr = p["contracts"] - q1 - q2
@@ -127,6 +147,8 @@ def run(bars, **kw):
         T["pts_avg"] = sum(x["pts"] * x["qty"] for x in T["exits"]) / sum(x["qty"] for x in T["exits"])
         T["R"] = T["pts_avg"] / T["risk"]
         T["exit_why"] = T["exits"][-1]["why"]
+        if T["usd"] < 0:
+            losses_day[tday[k]] = losses_day.get(tday[k], 0) + 1
         trades.append(T)
 
     for k in range(n):
@@ -203,9 +225,20 @@ def run(bars, **kw):
                     if curR >= 2 and curR > T["lastR"]:
                         ev(k, "r", "", r_from=max(T["lastR"] + 1, 2), r_to=curR)
                         T["lastR"] = curR
-                    if T["hit"] >= p["confirm"]:
+                    open_R = ((c[k] - T["entry"]) * d) / T["risk"]
+                    rule = None
+                    if p["inval_bars"] and k - T["k"] <= p["inval_bars"] and \
+                            ((d == 1 and c[k] < vwap[k]) or (d == -1 and c[k] > vwap[k])):
+                        rule = "Failed cross"
+                    elif p["flat_at"] is not None and p["flat_at"] <= hm[k] < 1800:
+                        rule = "Flat 4:55"
+                    elif T["hit"] >= p["confirm"]:
+                        rule = f"Trend {score}/4"
+                    elif warn_now and p["warn_exit_under"] is not None and open_R < p["warn_exit_under"]:
+                        rule = "Warning <1R"
+                    if rule:
                         for leg in ("tp1", "tp2", "run"):
-                            close_leg(k, leg, c[k] - d * slip, f"Trend {score}/4")
+                            close_leg(k, leg, c[k] - d * slip, rule)
                         finish(k); ev(k, "exit", ""); T = None; exit_now = True
                     elif warn_now:
                         in_profit = (c[k] > T["entry"]) if d == 1 else (c[k] < T["entry"])
@@ -216,7 +249,7 @@ def run(bars, **kw):
                         ev(k, "warn", "", score=score, closed_tp2=closed_tp2)
 
         # ---- entries (flat only)
-        if T is None and not exit_now and not np.isnan(atr[k]) and k > 30:
+        if T is None and not exit_now and not np.isnan(atr[k]) and k > 30 and not blocked(k):
             d = 1 if long_sig[k] else -1 if short_sig[k] else 0
             if d:
                 risk = atr[k] * p["atr_mult"]
