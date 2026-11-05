@@ -8,7 +8,7 @@
 //   • Runner: rest held until the trend-change EXIT
 // Leave it on a chart: TradingView keeps simulating every new bar, and the
 // Strategy Tester → List of Trades becomes your forward-test log.
-strategy("9 EMA × VWAP v3.3.1 — Auto Sim", overlay=true,
+strategy("9 EMA × VWAP v3.3.2 — Auto Sim", overlay=true,
      initial_capital=50000, default_qty_type=strategy.fixed, default_qty_value=3,
      commission_type=strategy.commission.cash_per_contract, commission_value=0.62,
      slippage=1, process_orders_on_close=true, pyramiding=0,
@@ -54,6 +54,12 @@ showR       = input.bool(true, "Show R milestones", group=grpD)
 firstR      = input.int(2, "Start R labels at", minval=1, maxval=10, group=grpD)
 rGap        = input.float(0.9, "R label distance (× ATR)", minval=0.0, step=0.1, group=grpD)
 showLines   = input.bool(true, "Show 9 EMA / VWAP / 21 EMA (turn off if the indicator is also on the chart)", group=grpD)
+showEntry   = input.bool(true, "Show entry price line", group=grpD)
+showReason  = input.bool(true, "Show exit reason box", group=grpD)
+reasonGap   = input.float(1.5, "Exit reason distance (× ATR)", minval=0.5, step=0.25, group=grpD)
+showEarly   = input.bool(true, "Show early warning (Sweep)", group=grpD, tooltip="Price takes out a recent swing in the trade's direction, then closes back through it. Display only — never exits.")
+sweepLen    = input.int(3, "Sweep swing strength", minval=1, maxval=10, group=grpD)
+reclaimBars = input.int(3, "Sweep must reclaim within (bars)", minval=0, maxval=10, group=grpD)
 
 grp5 = "Window"
 startDate = input.time(timestamp("2024-01-01T00:00:00"), "Start", group=grp5)
@@ -107,6 +113,44 @@ if not slTaken and close < swingLow
     bearBreak := true
     slTaken   := true
 
+// Sweep & reclaim (early warning, same as the indicator)
+sph = ta.pivothigh(high, sweepLen, sweepLen)
+spl = ta.pivotlow(low,  sweepLen, sweepLen)
+var float sLow      = na
+var float sHigh     = na
+var int   lowSwept  = na
+var int   highSwept = na
+if not na(spl)
+    sLow     := spl
+    lowSwept := na
+if not na(sph)
+    sHigh     := sph
+    highSwept := na
+bullReclaim = false
+bearReclaim = false
+if not na(sLow)
+    if na(lowSwept) and low < sLow
+        lowSwept := bar_index
+    if not na(lowSwept)
+        if close > sLow and bar_index - lowSwept <= reclaimBars
+            bullReclaim := true
+            sLow     := na
+            lowSwept := na
+        else if bar_index - lowSwept >= reclaimBars
+            sLow     := na
+            lowSwept := na
+if not na(sHigh)
+    if na(highSwept) and high > sHigh
+        highSwept := bar_index
+    if not na(highSwept)
+        if close < sHigh and bar_index - highSwept <= reclaimBars
+            bearReclaim := true
+            sHigh     := na
+            highSwept := na
+        else if bar_index - highSwept >= reclaimBars
+            sHigh     := na
+            highSwept := na
+
 //══════════════════════════════════════════════════════════════
 // STATE
 //══════════════════════════════════════════════════════════════
@@ -121,12 +165,20 @@ var bool  structAgainst = false
 var int   hitCount      = 0
 var bool  warned        = false
 var int   lastR         = 0
+var bool  scriptClosed  = false   // true when the trend-change exit closed the trade
+var int   lastScore     = 0
 
 pos    = strategy.position_size
 absPos = int(math.round(math.abs(pos)))
 
 // Flat again (stop, trend exit, or all targets) → reset
 if dir != 0 and pos == 0 and expectedQty > 0 and bar_index > 0
+    if not scriptClosed and showReason          // the stop (or breakeven stop) closed it on this bar
+        why = runQ == 0 and tp2Done ? "Targets" : stopLevel == entryPx ? "BE" : "Stop"
+        if dir == 1
+            label.new(bar_index, high + atr * reasonGap, why, yloc=yloc.price, style=label.style_label_down, color=color.new(color.orange, 10), textcolor=color.black, size=size.small)
+        else
+            label.new(bar_index, low - atr * reasonGap, why, yloc=yloc.price, style=label.style_label_up, color=color.new(color.orange, 10), textcolor=color.black, size=size.small)
     dir         := 0
     expectedQty := 0
 
@@ -146,6 +198,7 @@ if dir != 0 and absPos > 0 and absPos < expectedQty
 // MANAGEMENT
 //══════════════════════════════════════════════════════════════
 warnNow  = false
+earlyNow = false
 exitNow  = false
 exitText = ""
 
@@ -163,6 +216,8 @@ if dir != 0 and absPos > 0 and barstate.isconfirmed
     score = dir == 1 ?
          (close < vwap ? 1 : 0) + (ema9 < ema21 ? 1 : 0) + (vwapFalling ? 1 : 0) + (structAgainst ? 1 : 0) :
          (close > vwap ? 1 : 0) + (ema9 > ema21 ? 1 : 0) + (vwapRising  ? 1 : 0) + (structAgainst ? 1 : 0)
+    lastScore := score
+    earlyNow := (dir == 1 and bearReclaim) or (dir == -1 and bullReclaim)
     hitCount := score >= exitScore ? hitCount + 1 : 0
     warnNow  := score >= warnScore and not warned
     warned   := score >= warnScore
@@ -171,6 +226,12 @@ if dir != 0 and absPos > 0 and barstate.isconfirmed
         exitNow  := true
         exitText := "Trend Δ " + str.tostring(score) + "/4"
         strategy.close(dir == 1 ? "L" : "S", comment=exitText)
+        scriptClosed := true
+        if showReason
+            if dir == 1
+                label.new(bar_index, high + atr * reasonGap, exitText, yloc=yloc.price, style=label.style_label_down, color=color.new(color.orange, 10), textcolor=color.black, size=size.small)
+            else
+                label.new(bar_index, low - atr * reasonGap, exitText, yloc=yloc.price, style=label.style_label_up, color=color.new(color.orange, 10), textcolor=color.black, size=size.small)
     else if warnNow and tp2AtWarn and not tp2Done and tp2Q > 0
         inProfit = dir == 1 ? close > entryPx : close < entryPx
         if inProfit
@@ -202,6 +263,8 @@ if inRange and dir == 0 and pos == 0 and not exitNow
         hitCount      := 0
         warned        := false
         lastR         := 0
+        scriptClosed  := false
+        lastScore     := 0
 
 //══════════════════════════════════════════════════════════════
 // R MILESTONES — every whole R reached, stacked if one candle covers several
@@ -247,7 +310,12 @@ plot(showLines ? ema21 : na, "21 EMA", color=color.orange, linewidth=1)
 plotshape(showSignals and longCondition,  title="BUY",  style=shape.triangleup,   location=location.belowbar, color=color.lime, size=size.normal, text="BUY")
 plotshape(showSignals and shortCondition, title="SELL", style=shape.triangledown, location=location.abovebar, color=color.red,  size=size.normal, text="SELL")
 inTrade = dir != 0
+plot(showEntry and inTrade ? entryPx : na, "Entry", color=color.gray, style=plot.style_linebr)
+plotshape(showEarly and earlyNow and dir == 1,  title="Early warning (long)",  style=shape.circle, location=location.abovebar, color=color.fuchsia, size=size.tiny, text="Sweep")
+plotshape(showEarly and earlyNow and dir == -1, title="Early warning (short)", style=shape.circle, location=location.belowbar, color=color.fuchsia, size=size.tiny, text="Sweep")
+plot(inTrade ? lastScore : na, "Trend-change score (0-4)", display=display.data_window)
 plot(inTrade ? stopLevel : na, "Stop", color=color.red, style=plot.style_linebr)
 plot(inTrade and not tp1Done ? (dir == 1 ? entryPx + risk * tp1R : entryPx - risk * tp1R) : na, "TP1", color=color.green, style=plot.style_linebr)
 plot(inTrade and not tp2Done ? (dir == 1 ? entryPx + risk * tp2R : entryPx - risk * tp2R) : na, "TP2", color=color.new(color.green, 50), style=plot.style_linebr)
-plotshape(warnNow, title="⚠", style=shape.triangledown, location=location.abovebar, color=color.yellow, size=size.tiny, text="⚠")
+plotshape(warnNow and dir == 1,  title="⚠ (long)",  style=shape.triangledown, location=location.abovebar, color=color.yellow, size=size.tiny, text="⚠")
+plotshape(warnNow and dir == -1, title="⚠ (short)", style=shape.triangleup,   location=location.belowbar, color=color.yellow, size=size.tiny, text="⚠")
