@@ -114,7 +114,9 @@ def entry_msg(t, joining=False):
     if t["tp2"] is not None:
         tp.append(f"TP2 {f(t['tp2'])} ({t['r2']:g}R or ⚠)")
     return (f"{head} | {side(t)} MNQ @ {f(t['entry'])} ({t_et(t['entry_ts'])} 5m bar) | "
-            f"stop {f(t['stop'])} ({t['stop_pts']:.1f} pts) | {' | '.join(tp)} | runner to trend EXIT | "
+            f"stop {f(t['stop0'])} ({t['stop_pts']:.1f} pts)"
+            + (f", now at breakeven {f(t['stop'])}" if t["stop"] != t["stop0"] else "")
+            + f" | {' | '.join(tp)} | runner to trend EXIT | "
             f"1R = {t['risk']:.1f} pts | {t['qty']} micros, ${risk_usd(t):,.0f} at risk | data delayed ~10 min")
 
 
@@ -185,7 +187,7 @@ def save(st, closed):
             new = pd.concat([pd.read_csv(LOG), new]).drop_duplicates("id", keep="last")
         new.to_csv(LOG, index=False)
     if os.environ.get("GITHUB_ACTIONS") and not DRY:
-        subprocess.run("git add bot/state.json bot/trades.csv 2>/dev/null; "
+        subprocess.run("for f in bot/state.json bot/trades.csv; do [ -f $f ] && git add $f; done; "
                        "git diff --cached --quiet || (git commit -q -m 'EMA x VWAP paper update' && "
                        "git pull -q --rebase && git push -q)", shell=True, cwd=os.path.join(HERE, ".."))
 
